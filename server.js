@@ -1,96 +1,193 @@
 const express = require('express');
+const cors = require('cors');
+const sqlite3 = require('sqlite3').verbose();
+const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
+
 const app = express();
-const PORT = process.env.PORT || 10000;
-const ADMIN_PASSWORD = "ZYNVORA123";
+const PORT = process.env.PORT || 3000;
+const ADMIN_PASS = "ZYNVORA123";
 
+app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({extended:true}));
 
-let users = [];
-let videos = [];
-let messages = [];
+// Upload setup
+if(!fs.existsSync('uploads')) fs.mkdirSync('uploads');
+const storage = multer.diskStorage({
+  destination:'uploads/',
+  filename:(req,file,cb)=>cb(null, Date.now()+path.extname(file.originalname))
+});
+const upload = multer({storage});
+app.use('/uploads', express.static('uploads'));
+app.use(express.static(__dirname));
 
-app.get('/api/users', (req, res) => res.json(users));
-app.get('/api/videos', (req, res) => res.json(videos.reverse()));
+// Database
+const db = new sqlite3.Database('./database.sqlite');
 
-app.get('/api/messages', (req, res) => {
-  const { user, with: withUser } = req.query;
-  if(user && withUser){
-    const filtered = messages.filter(m => 
-      (m.from===user && m.to===withUser) || (m.from===withUser && m.to===user)
-    );
-    return res.json(filtered);
-  }
-  res.json(messages);
+db.serialize(()=>{
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    fullName TEXT,
+    password TEXT,
+    avatar TEXT,
+    banned INTEGER DEFAULT 0,
+    created DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    videoUrl TEXT,
+    caption TEXT,
+    type TEXT DEFAULT 'video',
+    likes INTEGER DEFAULT 0,
+    comments INTEGER DEFAULT 0,
+    created DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_user TEXT,
+    to_user TEXT,
+    text TEXT,
+    created DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    videoId INTEGER,
+    username TEXT,
+    text TEXT,
+    created DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  // For old DB, add columns if missing
+  db.run(`ALTER TABLE users ADD COLUMN avatar TEXT`,()=>{});
+  db.run(`ALTER TABLE videos ADD COLUMN comments INTEGER DEFAULT 0`,()=>{});
 });
 
-app.post('/api/admin/login', (req,res)=>{
-  if(req.body.password === ADMIN_PASSWORD) return res.json({success:true});
-  return res.status(401).json({error:'Wrong password'});
+// --- API ---
+
+// Register
+app.post('/api/register',(req,res)=>{
+  const {username, fullName, password} = req.body;
+  if(!username || !password) return res.json({error:'Fill all'});
+  db.get('SELECT * FROM users WHERE username=?',[username],(e,row)=>{
+    if(row) return res.json({error:'Username taken'});
+    db.run('INSERT INTO users(username, fullName, password) VALUES(?,?,?)',[username, fullName, password],function(err){
+      if(err) return res.json({error:'Error'});
+      db.get('SELECT * FROM users WHERE id=?',[this.lastID],(e2,u)=>res.json({user:u}));
+    });
+  });
 });
 
-app.post('/api/register', (req, res) => {
-  const { username, fullName, password } = req.body;
-  if(!username || !password) return res.status(400).json({error:'missing'});
-  if(users.find(u=>u.username===username)) return res.status(400).json({error:'User exists'});
-  const newUser = { id: Date.now(), username, fullName: fullName||username, password, banned: false, created: new Date().toISOString() };
-  users.push(newUser);
-  res.json({ success:true, user: newUser });
+// Login
+app.post('/api/login',(req,res)=>{
+  const {username, password} = req.body;
+  db.get('SELECT * FROM users WHERE username=? AND password=?',[username, password],(e,row)=>{
+    if(!row) return res.json({error:'Wrong username or password'});
+    if(row.banned) return res.json({error:'You are banned'});
+    res.json({user:row});
+  });
 });
 
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
-  const user = users.find(u=>u.username===username && u.password===password);
-  if(!user) return res.status(400).json({error:'Invalid login'});
-  if(user.banned) return res.status(403).json({error:'You are banned by admin'});
-  res.json({ success:true, user });
+// Users
+app.get('/api/users',(req,res)=>{
+  db.all('SELECT id, username, fullName, avatar, banned, created FROM users ORDER BY id DESC',(e,rows)=>{
+    res.json(rows||[]);
+  });
 });
 
-app.post('/api/ban/:id', (req, res) => {
-  if(req.headers['x-admin-pass'] !== ADMIN_PASSWORD) return res.status(401).json({error:'admin only'});
-  const user = users.find(u=>u.id==req.params.id);
-  if(user){ user.banned = !user.banned; }
-  res.json({ success:true });
+// Videos
+app.get('/api/videos',(req,res)=>{
+  db.all('SELECT * FROM videos ORDER BY id DESC',(e,rows)=>{
+    res.json(rows||[]);
+  });
+});
+app.post('/api/videos',(req,res)=>{
+  const {username, videoUrl, caption, type} = req.body;
+  if(!videoUrl) return res.json({error:'No video'});
+  db.run('INSERT INTO videos(username, videoUrl, caption, type) VALUES(?,?,?,?)',[username, videoUrl, caption||'', type||'video'],function(e){
+    res.json({id:this.lastID});
+  });
 });
 
-app.delete('/api/users/:id', (req, res) => {
-  if(req.headers['x-admin-pass'] !== ADMIN_PASSWORD) return res.status(401).json({error:'admin only'});
-  users = users.filter(u=>u.id != req.params.id);
-  res.json({ success:true });
+// Like
+app.post('/api/like/:id',(req,res)=>{
+  db.run('UPDATE videos SET likes = likes + 1 WHERE id=?',[req.params.id],()=>{
+    res.json({ok:true});
+  });
 });
 
-app.post('/api/videos', (req, res) => {
-  const { username, videoUrl, caption, type } = req.body;
-  if(!videoUrl) return res.status(400).json({error:'videoUrl required'});
-  const user = users.find(u=>u.username===username);
-  if(user && user.banned) return res.status(403).json({error:'banned'});
-  const newVideo = { id: Date.now(), username: username||'anon', videoUrl, caption: caption||'', type: type||'video', likes:0, created: new Date().toISOString() };
-  videos.push(newVideo);
-  res.json(newVideo);
+// Upload file (video/image)
+app.post('/api/upload', upload.single('file'), (req,res)=>{
+  if(!req.file) return res.json({error:'No file'});
+  res.json({url:'/uploads/'+req.file.filename});
 });
 
-app.post('/api/like/:id', (req,res)=>{
-  const v = videos.find(v=>v.id==req.params.id);
-  if(v) v.likes++;
-  res.json({success:true});
+// Profile Avatar Update
+app.post('/api/profile/avatar',(req,res)=>{
+  const {username, avatar} = req.body;
+  db.run('UPDATE users SET avatar=? WHERE username=?',[avatar, username],()=>{
+    db.get('SELECT * FROM users WHERE username=?',[username],(e,u)=>{
+      res.json({user:u});
+    });
+  });
 });
 
-app.delete('/api/videos/:id', (req, res) => {
-  if(req.headers['x-admin-pass'] !== ADMIN_PASSWORD) return res.status(401).json({error:'admin only'});
-  videos = videos.filter(v=>v.id != req.params.id);
-  res.json({ success:true });
+// Comments
+app.get('/api/comments/:videoId',(req,res)=>{
+  db.all('SELECT * FROM comments WHERE videoId=? ORDER BY id ASC',[req.params.videoId],(e,rows)=>{
+    res.json(rows||[]);
+  });
+});
+app.post('/api/comments',(req,res)=>{
+  const {videoId, username, text} = req.body;
+  if(!text) return res.json({error:'Empty'});
+  db.run('INSERT INTO comments(videoId, username, text) VALUES(?,?,?)',[videoId, username, text],()=>{
+    db.run('UPDATE videos SET comments = comments + 1 WHERE id=?',[videoId]);
+    res.json({ok:true});
+  });
 });
 
-app.post('/api/messages', (req,res)=>{
-  const { from, to, text } = req.body;
-  if(!from || !to || !text) return res.status(400).json({error:'missing'});
-  const msg = { id: Date.now(), from, to, text, created: new Date().toISOString() };
-  messages.push(msg);
-  res.json(msg);
+// Messages
+app.get('/api/messages',(req,res)=>{
+  const {user, with:withUser} = req.query;
+  db.all('SELECT * FROM messages WHERE (from_user=? AND to_user=?) OR (from_user=? AND to_user=?) ORDER BY id ASC',[user, withUser, withUser, user],(e,rows)=>{
+    const list = (rows||[]).map(r=>({from:r.from_user, to:r.to_user, text:r.text, created:r.created}));
+    res.json(list);
+  });
+});
+app.get('/api/messages/all',(req,res)=>{
+  db.all('SELECT * FROM messages ORDER BY id DESC LIMIT 100',(e,rows)=>res.json(rows||[]));
+});
+app.post('/api/messages',(req,res)=>{
+  const {from, to, text} = req.body;
+  db.run('INSERT INTO messages(from_user, to_user, text) VALUES(?,?,?)',[from, to, text],()=>res.json({ok:true}));
 });
 
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+// Admin
+app.post('/api/admin/login',(req,res)=>{
+  if(req.body.password===ADMIN_PASS) res.json({ok:true});
+  else res.json({error:'Wrong password'});
+});
+app.post('/api/ban/:id',(req,res)=>{
+  if(req.headers['x-admin-pass']!==ADMIN_PASS) return res.json({error:'No admin'});
+  db.get('SELECT banned FROM users WHERE id=?',[req.params.id],(e,u)=>{
+    const newBan = u && u.banned ? 0 : 1;
+    db.run('UPDATE users SET banned=? WHERE id=?',[newBan, req.params.id],()=>res.json({ok:true}));
+  });
+});
+app.delete('/api/users/:id',(req,res)=>{
+  if(req.headers['x-admin-pass']!==ADMIN_PASS) return res.json({error:'No admin'});
+  db.run('DELETE FROM users WHERE id=?',[req.params.id],()=>res.json({ok:true}));
+});
+app.delete('/api/videos/:id',(req,res)=>{
+  if(req.headers['x-admin-pass']!==ADMIN_PASS) return res.json({error:'No admin'});
+  db.run('DELETE FROM videos WHERE id=?',[req.params.id],()=>res.json({ok:true}));
+});
 
-app.listen(PORT, ()=> console.log('ZYNVORA LIVE'));
+// Pages
+app.get('/admin',(req,res)=>res.sendFile(path.join(__dirname,'admin.html')));
+app.get('/',(req,res)=>res.sendFile(path.join(__dirname,'index.html')));
+
+app.listen(PORT,()=>console.log('ZYNVORA Running on '+PORT));
