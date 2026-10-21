@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZYNVORA ADMIN</title>
+<style>
+body{background:#111;color:#fff;font-family:sans-serif;padding:20px;margin:0}
+h2{color:#ff0050}
+.box{background:#222;padding:15px;border-radius:10px;margin-bottom:20px}
+input,textarea{width:100%;padding:10px;margin:5px 0;border-radius:5px;border:none;box-sizing:border-box}
+button{padding:10px 20px;background:#ff0050;color:#fff;border:none;border-radius:5px;font-weight:bold;cursor:pointer}
+.item{background:#333;padding:10px;margin:5px 0;border-radius:5px;display:flex;justify-content:space-between;align-items:center}
+.del{background:#555}
+</style>
+</head>
+<body>
+<h2>ZYNVORA ADMIN PANEL</h2>
+
+<div class="box">
+<h3>Add User</h3>
+<input id="username" placeholder="Username">
+<textarea id="bio" placeholder="Bio"></textarea>
+<button onclick="addUser()">Add User</button>
+</div>
+
+<div class="box">
+<h3>Add Video</h3>
+<input id="vuser" placeholder="Username (e.g. anon)">
+<input id="vurl" placeholder="Video URL (mp4 link)">
+<textarea id="vdesc" placeholder="Description"></textarea>
+<button onclick="addVideo()">Add Video</button>
+</div>
+
+<div class="box">
+<h3>All Users</h3>
+<div id="users"></div>
+</div>
+
+<div class="box">
+<h3>All Videos</h3>
+<div id="videos"></div>
+</div>
+
+<script>
+async function addUser(){
+ let u=document.getElementById('username').value;
+ let b=document.getElementById('bio').value;
+ if(!u) return alert('username lagbe');
+ await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,bio:b})});
+ alert('User Added'); load(); 
+}
+async function addVideo(){
+ let username=document.getElementById('vuser').value;
+ let videoUrl=document.getElementById('vurl').value;
+ let descp=document.getElementById('vdesc').value;
+ if(!videoUrl) return alert('Video URL lagbe');
+ await fetch('/api/videos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,videoUrl,descp})});
+ alert('Video Added'); load();
+}
+async function load(){
+ let ru=await fetch('/api/users'); let users=await ru.json();
+ document.getElementById('users').innerHTML=users.map(u=>`<div class="item"><span>${u.id}. ${u.username} - ${u.bio||''}</span><button class="del" onclick="delUser(${u.id})">Delete</button></div>`).join('')||'No users';
+ let rv=await fetch('/api/videos'); let videos=await rv.json();
+ document.getElementById('videos').innerHTML=videos.map(v=>`<div class="item"><span>${v.id}. @${v.username} - ${v.descp||''}</span><button class="del" onclick="delVideo(${v.id})">Delete</button></div>`).join('')||'No videos';
+}
+async function delUser(id){ if(confirm('Delete?')){ await fetch('/api/users/'+id,{method:'DELETE'}); load(); } }
+async function delVideo(id){ if(confirm('Delete?')){ await fetch('/api/videos/'+id,{method:'DELETE'}); load(); } }
+load();
+</script>
+</body>
+</html>
